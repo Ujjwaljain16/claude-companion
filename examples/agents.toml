@@ -1,0 +1,21 @@
+# Copy to %USERPROFILE%\.claude-companion\agents.toml (or set COMPANION_AGENTS_FILE) and edit.
+# Only this file can register agents; MCP tools can list and run them, never add them.
+# Paths below assume the repo lives in D:\Projects\claude-companion.
+
+[agents.trip]
+description = "Travel agent on the plain OpenAI SDK; model calls go through the session bridge"
+command = ["uv", "run", "--no-sync", "python", "examples/agents/trip_agent_runner.py"]
+cwd = "D:/Projects/claude-companion"
+timeout_s = 900
+
+[agents.rules]
+description = "Deterministic capital-lookup agent (no model) for trying the runner offline"
+command = ["uv", "run", "--no-sync", "python", "examples/agents/rule_agent.py"]
+cwd = "D:/Projects/claude-companion"
+timeout_s = 30
+
+[agents.calc-ts]
+description = "TypeScript calculator agent (no model)"
+command = ["node", "--experimental-strip-types", "--no-warnings", "examples/agents/calc_agent.ts"]
+cwd = "D:/Projects/claude-companion"
+timeout_s = 30
