@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "companion": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "--frozen", "--quiet", "companion-mcp"],
+      "env": {}
+    }
+  }
+}
