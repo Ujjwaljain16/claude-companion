@@ -43,6 +43,18 @@ class Settings(BaseSettings):
     max_dataset_items: int = 2000
     # How long an agent's model call waits for the Claude session to answer.
     bridge_timeout_s: float = Field(default=900, gt=0)
+    # A claimed request goes back to the queue if its claimer hasn't answered by then.
+    bridge_claim_ttl_s: float = Field(default=180, gt=0)
+    # Which backend answers model ids that aren't claude-session / claude-headless*.
+    bridge_default_backend: str = Field(default="session", pattern="^(session|headless)$")
+
+    # Headless backend: runs Claude Code non-interactively (`claude -p`) per request.
+    # Auth is whatever that CLI is logged in with, or a token from `claude setup-token`.
+    claude_bin: str | None = None
+    claude_oauth_token: SecretStr | None = None
+    headless_model: str | None = None
+    headless_concurrency: int = Field(default=3, ge=1, le=16)
+    headless_timeout_s: float = Field(default=300, gt=0)
 
     anthropic_api_key: SecretStr | None = None
     openai_api_key: SecretStr | None = None

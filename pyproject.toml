@@ -27,6 +27,7 @@ postgres = ["asyncpg>=0.30"]
 [project.scripts]
 companion-gateway = "companion.gateway:main"
 companion-mcp = "companion.mcp_server:main"
+companion-headless-check = "companion.headless_check:main"
 
 [dependency-groups]
 dev = [
