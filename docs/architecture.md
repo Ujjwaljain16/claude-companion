@@ -9,7 +9,7 @@
 | Core | `src/companion/core.py` | Permission checks, audit, usage records, execution lifecycle (asyncio tasks), session tasks |
 | Evaluations | `evals.py`, `scorers.py` | Datasets, runs, scoring, judges, reports, comparisons |
 | Agent runner | `agents.py`, `sdk/` | Registry, one process per item, trajectories, agent metrics, failure analysis |
-| Session bridge | `bridge.py` | OpenAI/Anthropic-compatible endpoints answered by the Claude session |
+| Model bridge | `bridge.py`, `headless.py` | OpenAI/Anthropic-compatible endpoints; `claude-session` requests are claimed and answered from the chat, `claude-headless` requests run `claude -p` |
 | Workflows | `workflows.py` | LangGraph graphs with SQLite checkpoints and interrupts |
 | Providers | `providers.py` | Anthropic (official SDK), OpenAI-compatible (OpenAI, OpenRouter, Ollama, custom) and Gemini over httpx; retries, pricing |
 | Reports | `reports.py` | JSON, CSV, self-contained HTML |
@@ -50,8 +50,11 @@ queued ─▶ running ─┬─▶ succeeded
   bridge calls → score → judge → finalize. Items run with a concurrency limit.
 - **Workflow:** run the graph until it ends or hits an interrupt. An interrupt becomes a session task
   (`generate` or `approval`), and submitting it resumes the graph from its checkpoint.
-- **Bridge call:** a `model_request` execution plus an `llm` session task, held open by the HTTP
-  request. It's answered via `answer_model_request`, or expired on timeout or disconnect.
+- **Session bridge call:** a `model_request` execution plus an `llm` session task, held open by the
+  HTTP request. A server claims it (`open` → `claimed`), answers via `answer_model_request`, or the
+  claim lapses and it's handed out again; it expires on timeout or disconnect.
+- **Headless bridge call:** a `model_request` execution and a `claude -p` process, killed if the
+  caller disconnects or the timeout passes.
 
 On startup, executions left `queued` or `running` are marked failed. `waiting` ones stay, because
 their state is persisted.

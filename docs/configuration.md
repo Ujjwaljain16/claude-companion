@@ -14,7 +14,9 @@ directory. Restart the gateway after changing them.
 | `COMPANION_PORT` | `8765` | Gateway port; the MCP server and dashboard use the same variable |
 | `COMPANION_DATABASE_URL` | SQLite in the data folder | e.g. `postgresql+asyncpg://user:pass@127.0.0.1/companion` (needs `uv sync --extra postgres`) |
 | `COMPANION_MAX_DATASET_ITEMS` | `2000` | Items per dataset version |
-| `COMPANION_BRIDGE_TIMEOUT_S` | `900` | How long a bridge call waits for Claude to answer |
+| `COMPANION_BRIDGE_TIMEOUT_S` | `900` | How long a `claude-session` call waits for Claude to answer |
+| `COMPANION_BRIDGE_CLAIM_TTL_S` | `180` | A claimed but unanswered request goes back to the queue after this |
+| `COMPANION_BRIDGE_DEFAULT_BACKEND` | `session` | Backend for model ids other than `claude-session` / `claude-headless*`: `session` or `headless` |
 | `COMPANION_AGENTS_FILE` | `<home>/agents.toml` | Agent registry |
 | `COMPANION_PRICING_FILE` | – | JSON `{"model-id": [input_usd_per_mtok, output_usd_per_mtok]}` added to the built-in prices |
 
@@ -45,6 +47,18 @@ calls alike.
 Never set `ANTHROPIC_API_KEY` for this: Claude Code would use it and switch to API billing. The
 gateway ignores the unprefixed vendor variables on purpose.
 
+## Headless backend (`claude -p`)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `COMPANION_CLAUDE_BIN` | `claude` on PATH | Claude Code executable |
+| `COMPANION_CLAUDE_OAUTH_TOKEN` | – | Token from `claude setup-token`, passed to the CLI as `CLAUDE_CODE_OAUTH_TOKEN` |
+| `COMPANION_HEADLESS_MODEL` | CLI default | Model when the request says just `claude-headless` |
+| `COMPANION_HEADLESS_CONCURRENCY` | `3` | `claude -p` processes at once (1–16) |
+| `COMPANION_HEADLESS_TIMEOUT_S` | `300` | Per call; the process tree is killed after this |
+
+Check it with `uv run companion-headless-check`. See [model-backends.md](model-backends.md#path-a-headless-claude--p).
+
 ## MCP server
 
 | Variable | Default | Meaning |
@@ -74,6 +88,7 @@ It uses `COMPANION_HOME`, `COMPANION_PORT` and `COMPANION_GATEWAY_URL` the same 
   companion.db         SQLite database (unless COMPANION_DATABASE_URL is set)
   checkpoints.db       LangGraph workflow checkpoints
   gateway.log          log of a gateway started by the MCP server
+  headless/            empty working folder for claude -p calls
   reports/             exported HTML / CSV / JSON reports
   agent_runs/<run>/<item>/   task.json, result.json per agent item
 ```

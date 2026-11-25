@@ -1,6 +1,6 @@
 # MCP tools
 
-The `companion` MCP server exposes 23 tools to the Claude Code session. Each one validates its input
+The `companion` MCP server exposes 24 tools to the Claude Code session. Each one validates its input
 against a JSON Schema, returns structured JSON, and turns gateway errors into tool errors with the
 reason. Read-only tools carry the `readOnlyHint` annotation.
 
@@ -49,10 +49,11 @@ tool call stops the wait, not the job; use `cancel_execution` for that.
 
 | Tool | Does | Key inputs |
 |---|---|---|
-| `wait_for_model_request` | Next model call from an agent using the bridge, or `null` | `wait_seconds` (default 45) |
+| `wait_for_model_request` | Claim the next model call from an agent (model `claude-session`), or `null`. Each call claims a different request | `wait_seconds` (default 45) |
+| `watch_model_requests` | Counts of unclaimed and claimed requests, without contents, for a coordinator starting one helper per request | `wait_seconds` |
 | `answer_model_request` | Reply to that call as the agent's model | `request_id`, `content`, `tool_calls` (`[{name, arguments}]`) |
 
-See [session-bridge.md](session-bridge.md).
+See [model-backends.md](model-backends.md) and [session-bridge.md](session-bridge.md). The `/serve-agent` and `/serve-agent-parallel` commands and the `model-responder` subagent in `.claude/` drive these tools for you.
 
 ## Agent runner
 

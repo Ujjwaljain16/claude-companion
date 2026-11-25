@@ -1,7 +1,9 @@
 # Session model bridge
 
 Run an agent you are building on Claude, through your signed-in Claude Desktop Code session, with no
-API key.
+API key. This page covers the `claude-session` backend and the wire formats shared by all backends.
+For parallel helpers and the headless `claude -p` backend, and for choosing between them, see
+[model-backends.md](model-backends.md).
 
 ## How it works
 
@@ -55,8 +57,9 @@ duplicate request that Claude would also have to answer.
 
 ## Serve it
 
-In the Code tab: *"Serve my agent."* Claude loops `wait_for_model_request` → `answer_model_request`
-until no request arrives. Then run your agent. Try the examples:
+In the Code tab run `/serve-agent` (or say "serve my agent"). Claude loops `wait_for_model_request` →
+`answer_model_request` until no request arrives. For independent, parallel answers use
+`/serve-agent-parallel` instead. Then run your agent. Try the examples:
 
 ```powershell
 uv run python examples/agents/trip_agent.py "How far is Paris from Berlin by road, in miles?"
@@ -82,8 +85,9 @@ uv run python examples/agents/anthropic_sdk_agent.py
 
 ## Limits
 
-- **Speed:** each call is one turn in the chat, typically a few seconds, served one at a time even if
-  your agent sends several in parallel.
+- **Speed:** each call is one turn in the chat, typically a few seconds. `/serve-agent` serves one at a
+  time; `/serve-agent-parallel` answers several at once with fresh helpers. Requests are claimed, so
+  no two servers answer the same one.
 - **Someone has to serve:** with no session serving, a request waits up to `COMPANION_BRIDGE_TIMEOUT_S`
   (900 s), then gets a 504.
 - **One model:** every answer comes from the model running the serving session, whatever model id you

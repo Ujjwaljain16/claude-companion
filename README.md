@@ -7,8 +7,11 @@ needed.
 It does three things:
 
 1. **Lets your own agents use Claude without an API key.** Point any OpenAI- or Anthropic-SDK agent at
-   the gateway, tell Claude "serve my agent", and Claude answers your agent's model calls in the chat
-   ([session model bridge](docs/session-bridge.md)).
+   the gateway. The model id picks who answers ([model backends](docs/model-backends.md)):
+   - `claude-session`: Claude answers in your Code tab chat, one at a time or with parallel helper
+     subagents. No setup.
+   - `claude-headless`: a fresh `claude -p` process per call. Fast, parallel and unattended, after a
+     one-time `claude setup-token`.
 2. **Evaluates your agents.** It runs your agent over a dataset and scores its answers and tool use.
    You can compare prompt or model versions, catch regressions, group failures by cause, and export
    HTML, CSV or JSON reports ([agent runner](docs/agent-runner.md)).
@@ -40,7 +43,7 @@ uv sync
 
 Then try:
 
-- *"Serve my agent"*, and in a terminal: `uv run python examples/agents/trip_agent.py`
+- `/serve-agent`, and in a terminal: `uv run python examples/agents/trip_agent.py`
 - *"Run the agent `rules` over a capitals dataset with exact_match and tool_success, variants v1 and
   v2-buggy (config buggy=true), then compare them"* (copy [examples/agents.toml](examples/agents.toml) to
   `%USERPROFILE%\.claude-companion\agents.toml` first)
@@ -56,14 +59,28 @@ Open http://127.0.0.1:3765.
 
 Full walkthrough: [docs/getting-started.md](docs/getting-started.md).
 
+## Which backend when
+
+| You want to... | Use | Why |
+|---|---|---|
+| Build or debug an agent, step by step | `claude-session` + `/serve-agent` | No setup; you see every call in the chat |
+| Run a small eval with independent answers | `claude-session` + `/serve-agent-parallel` | One fresh helper per call, several at once; no login |
+| Run long, large or unattended evals on your subscription | `claude-headless` | No human in the loop, parallel, real token counts; needs `claude setup-token` once |
+| Ship something other people use, or run CI | a provider API key | The subscription paths are for your personal use only |
+| Run free bulk jobs offline | Ollama | Local GPU, no account |
+
+Full comparison, setup steps and caveats (billing, the token login, emulated tool calling):
+[docs/model-backends.md](docs/model-backends.md).
+
 ## Important limits
 
-- **It cannot use your Claude subscription as a programmatic API.** Claude Code doesn't support MCP
-  sampling, and this project doesn't extract or forward credentials. Every bridge call is answered by
-  Claude in your chat, so it's slow (a few seconds per call, one at a time) and needs a session that
-  keeps serving. Use it for building and debugging agents and small runs; use a provider key or a
-  local model for bulk evaluation. Details: [docs/desktop-integration.md](docs/desktop-integration.md).
-- **Bridge token counts are estimates**, and cost shows as $0 because it runs on your plan.
+- **The session paths are a chat in the loop.** Claude Code doesn't support MCP sampling, and this
+  project never extracts or forwards credentials, so `claude-session` calls are answered by Claude in
+  your chat: a few seconds each, and a session has to keep serving. Their token counts are estimates.
+- **The headless path uses Claude Code's documented non-interactive mode** on a token from
+  `claude setup-token`. Anthropic bills `claude -p` on subscriptions separately from chat usage. It's
+  for your own use; don't share your subscription through it.
+  Details: [docs/model-backends.md](docs/model-backends.md), [docs/desktop-integration.md](docs/desktop-integration.md).
 - **Public benchmarks (SWE-bench, WebArena, GAIA, ...) are not included.** Add one as a dataset plus
   scorer when you need it.
 
@@ -72,11 +89,12 @@ Full walkthrough: [docs/getting-started.md](docs/getting-started.md).
 | Guide | What it covers |
 |---|---|
 | [Getting started](docs/getting-started.md) | Install, connect Claude Desktop, first evaluation, dashboard, provider keys |
-| [Session model bridge](docs/session-bridge.md) | Run any agent on Claude through the chat, with no API key |
+| [Model backends](docs/model-backends.md) | Session vs parallel helpers vs headless vs API keys: what, when, why, how |
+| [Session model bridge](docs/session-bridge.md) | The bridge endpoints, wire formats and what's supported |
 | [Agent runner](docs/agent-runner.md) | Register an agent, the task/result contract, metrics, variants, reports |
 | [Evaluations](docs/evaluations.md) | Datasets, scorers, judges, comparisons, experiments |
 | [Workflows](docs/workflows.md) | The LangGraph `draft_review` workflow and human approval |
-| [MCP tools](docs/mcp-tools.md) | All 23 tools Claude can call |
+| [MCP tools](docs/mcp-tools.md) | All 24 tools Claude can call |
 | [HTTP API](docs/http-api.md) | Gateway endpoints |
 | [Configuration](docs/configuration.md) | Every setting, the data folder, Postgres, tracing |
 | [Security](docs/security.md) | Threat model and protections |
@@ -94,7 +112,7 @@ uv run pytest -q
 cd dashboard; pnpm test; pnpm lint; pnpm build
 ```
 
-The Python suite (54 tests) includes MCP contract tests that start the real stdio server as a
+The Python suite (62 tests) includes MCP contract tests that start the real stdio server as a
 subprocess, bridge tests using the real OpenAI and Anthropic SDKs, and agent-runner tests that run
 Python and TypeScript agent processes, including checks that timeouts and cancels kill them.
 

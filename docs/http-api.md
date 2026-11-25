@@ -86,9 +86,10 @@ Execution statuses: `queued`, `running`, `waiting` (on a session task or approva
 |---|---|---|
 | POST | `/v1/chat/completions` | OpenAI Chat Completions format, `stream` supported |
 | POST | `/v1/messages` | Anthropic Messages format, `stream` supported |
-| GET | `/v1/models` | `claude-session` |
-| GET | `/api/bridge/next?wait=` | Next pending request (used by `wait_for_model_request`) |
-| GET | `/api/bridge/pending` | Requests waiting right now |
+| GET | `/v1/models` | `claude-session`, `claude-headless` |
+| GET | `/api/bridge/backends` | Default backend, waiting requests, headless CLI status |
+| GET | `/api/bridge/next?wait=` | Claim the next unclaimed session request (used by `wait_for_model_request`) |
+| GET | `/api/bridge/pending?wait=` | Unclaimed/claimed counts and ids, no contents; waits for an unclaimed one |
 | POST | `/api/bridge/{request_id}/answer` | `{content?, tool_calls?: [{name, arguments}]}` |
 
-Optional request headers: `X-Agent-Name`, `X-Companion-Tag`.
+Optional request headers: `X-Agent-Name`, `X-Companion-Tag`. The model id picks the backend: `claude-session` → chat, `claude-headless[/<model>]` → `claude -p`, anything else → `COMPANION_BRIDGE_DEFAULT_BACKEND`.

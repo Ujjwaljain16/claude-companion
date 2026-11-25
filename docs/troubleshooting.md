@@ -37,6 +37,27 @@ as high.
 
 The client retried. Set `max_retries=0` (OpenAI, Anthropic SDKs) for the bridge.
 
+## `claude-headless` returns 503 "claude CLI is not signed in"
+
+Run `claude setup-token` in a normal terminal (not inside Claude Desktop), put the token in
+`~/.claude-companion/.env` as `COMPANION_CLAUDE_OAUTH_TOKEN`, restart the gateway, and run
+`uv run companion-headless-check`. If a fresh token still gets 401, that's a known Claude Code issue
+with `setup-token` tokens. Fall back to the session paths or an API key.
+
+## `claude-headless` returns 503 "claude CLI not found"
+
+Install Claude Code so `claude` is on PATH, or set `COMPANION_CLAUDE_BIN` to the executable.
+
+## `claude-headless` returns 502 "unusable reply twice"
+
+The CLI's reply didn't fit the `{content, tool_calls}` schema, or it named a tool you didn't offer,
+on both tries. Check that your tool definitions have names and JSON-schema parameters.
+
+## Two helpers answered the same request
+
+They can't: requests are claimed atomically. A claim that isn't answered within
+`COMPANION_BRIDGE_CLAIM_TTL_S` is handed out again, so if a helper is very slow, raise that value.
+
 ## Bridge returns 401
 
 The API key must be the contents of `~/.claude-companion/gateway.token` (no newline), not an Anthropic

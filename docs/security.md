@@ -8,8 +8,9 @@ recorded.
 
 - Read, copy or forward Claude Desktop or Claude Code credentials, OAuth tokens, or their auth storage.
 - Intercept Desktop traffic or call undocumented Desktop APIs.
-- Use the Claude subscription as a programmatic API. The session bridge relays what Claude writes in
-  your chat; the gateway never calls Anthropic on the subscription's behalf.
+- Use your Claude credentials itself. The session backend relays what Claude writes in your chat.
+  The headless backend runs the official `claude` CLI, which authenticates itself with its own login
+  or the `setup-token` token you configure. The gateway never calls Anthropic with your credentials.
 - Desktop detection only checks that the install folder exists; it doesn't open anything inside it.
 
 ## Network
@@ -45,6 +46,17 @@ recorded.
 - The audit log records dataset versions, experiments, runs, agent runs, workflows, task submissions
   and cancellations, with the actor (`mcp`, `dashboard`, `api`). View it on the Settings page or at
   `/api/audit`.
+
+## Headless backend
+
+- `claude -p` runs with no built-in tools, no MCP servers, no settings sources, an empty working
+  folder and no saved session, so a request can't make it read files, run commands or reach your MCP
+  servers. It can only produce the `{content, tool_calls}` JSON, and tool calls are checked against
+  the tools your agent offered. Your agent runs those tools itself.
+- `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_SIMPLE` and the
+  gateway's `COMPANION_*` settings are removed from its environment.
+- `COMPANION_CLAUDE_OAUTH_TOKEN` grants access to your Claude subscription. Keep it in the git-ignored
+  `.env` and treat it like a password. Don't use it to serve other people.
 
 ## Secrets
 
