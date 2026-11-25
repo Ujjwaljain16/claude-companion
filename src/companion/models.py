@@ -117,6 +117,9 @@ class SessionTask(Base):
     resolved_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     resolved_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    # Bridge requests are claimed by one server at a time, so parallel helpers never answer the same one.
+    claimed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    claimed_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
 
 
 class TraceSpan(Base):

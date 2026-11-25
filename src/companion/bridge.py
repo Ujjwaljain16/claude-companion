@@ -28,10 +28,20 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 
 from companion.core import Core, NotFound
+from companion.headless import HeadlessBackend, HeadlessError
 from companion.models import SessionTask, utcnow
 from companion.telemetry import tracer
 
 BRIDGE_MODEL = "claude-session"
+HEADLESS_MODEL = "claude-headless"
+
+
+def backend_for(model: str | None, default: str) -> str:
+    if model == BRIDGE_MODEL:
+        return "session"
+    if model and model.startswith(HEADLESS_MODEL):
+        return "headless"
+    return default
 MAX_PAYLOAD_CHARS = 200_000
 
 
@@ -140,7 +150,8 @@ def openai_response(req: dict, ans: AnswerIn, usage: dict) -> dict:
             "model": req.get("model") or BRIDGE_MODEL,
             "choices": [{"index": 0, "message": msg, "finish_reason": "tool_calls" if ans.tool_calls else "stop"}],
             "usage": {"prompt_tokens": usage["input"], "completion_tokens": usage["output"],
-                      "total_tokens": usage["input"] + usage["output"]}}
+                      "total_tokens": usage["input"] + usage["output"],
+                      "prompt_tokens_details": {"cached_tokens": usage.get("cached", 0)}}}
 
 
 def anthropic_response(req: dict, ans: AnswerIn, usage: dict) -> dict:
@@ -152,7 +163,8 @@ def anthropic_response(req: dict, ans: AnswerIn, usage: dict) -> dict:
     return {"id": f"msg_{uuid.uuid4().hex[:24]}", "type": "message", "role": "assistant",
             "model": req.get("model") or BRIDGE_MODEL, "content": content,
             "stop_reason": "tool_use" if ans.tool_calls else "end_turn", "stop_sequence": None,
-            "usage": {"input_tokens": usage["input"], "output_tokens": usage["output"]}}
+            "usage": {"input_tokens": usage["input"] - usage.get("cached", 0), "output_tokens": usage["output"],
+                      "cache_read_input_tokens": usage.get("cached", 0)}}
 
 
 def _sse(data: Any, event: str | None = None) -> str:
@@ -194,9 +206,11 @@ def anthropic_stream_events(full: dict) -> list[str]:
 # the bridge itself ---------------------------------------------------------------
 
 class Bridge:
-    def __init__(self, core: Core, timeout_s: float):
+    def __init__(self, core: Core, timeout_s: float, claim_ttl_s: float = 180):
         self.core = core
         self.timeout_s = timeout_s
+        self.claim_ttl_s = claim_ttl_s
+        self.claim_lock = asyncio.Lock()
         self.waiters: dict[str, asyncio.Future[AnswerIn]] = {}
         self.tags: dict[str, str | None] = {}
         self.arrived = asyncio.Event()
@@ -257,21 +271,46 @@ class Bridge:
 
     async def _expire(self, task_id: str, execution_id: str, why: str) -> None:
         async with self.core.sessions() as s:
-            await s.execute(update(SessionTask).where(SessionTask.id == task_id, SessionTask.status == "open")
+            await s.execute(update(SessionTask).where(SessionTask.id == task_id, SessionTask.status.in_(["open", "claimed"]))
                             .values(status="expired", resolved_at=utcnow()))
             await s.commit()
         await self.core.set_status(execution_id, status="failed", error=why)
 
-    async def next_request(self, wait_s: float) -> SessionTask | None:
+    def _claim_fresh(self, t: SessionTask) -> bool:
+        if t.status != "claimed" or t.claimed_at is None:
+            return False
+        at = t.claimed_at if t.claimed_at.tzinfo else t.claimed_at.replace(tzinfo=timezone.utc)
+        return (utcnow() - at).total_seconds() < self.claim_ttl_s
+
+    async def _live_tasks(self) -> list[SessionTask]:
+        async with self.core.sessions() as s:
+            tasks = (await s.scalars(select(SessionTask).where(SessionTask.kind == "llm",
+                                                               SessionTask.status.in_(["open", "claimed"]))
+                                     .order_by(SessionTask.created_at))).all()
+        return [t for t in tasks if t.id in self.waiters and not self.waiters[t.id].done()]
+
+    async def next_request(self, wait_s: float, claimer: str = "session") -> SessionTask | None:
+        """Hands out the oldest unclaimed request and claims it, so parallel servers
+        each get a different one. A claim not answered within the TTL is handed out again."""
         deadline = time.monotonic() + wait_s
         while True:
             async with self.core.sessions() as s:
-                tasks = (await s.scalars(select(SessionTask).where(SessionTask.kind == "llm", SessionTask.status == "open")
+                tasks = (await s.scalars(select(SessionTask).where(SessionTask.kind == "llm",
+                                                                   SessionTask.status.in_(["open", "claimed"]))
                                          .order_by(SessionTask.created_at))).all()
             for t in tasks:
                 fut = self.waiters.get(t.id)
                 if fut is not None and not fut.done():
-                    return t
+                    if self._claim_fresh(t):
+                        continue
+                    async with self.claim_lock:
+                        async with self.core.sessions() as s:
+                            row = await s.get(SessionTask, t.id)
+                            if row is None or row.status not in ("open", "claimed") or self._claim_fresh(row):
+                                continue
+                            row.status, row.claimed_at, row.claimed_by = "claimed", utcnow(), claimer[:80]
+                            await s.commit()
+                            return row
                 created = t.created_at if t.created_at.tzinfo else t.created_at.replace(tzinfo=timezone.utc)
                 # A brand-new task may not have its waiter registered yet (submit is
                 # mid-flight); only expire ones that are stale or whose caller gave up.
@@ -292,7 +331,7 @@ class Bridge:
             task = await s.get(SessionTask, task_id)
             if task is None or task.kind != "llm":
                 raise NotFound(f"model request {task_id} not found")
-            if task.status != "open":
+            if task.status not in ("open", "claimed"):
                 raise ValueError(f"model request {task_id} is {task.status}")
             known = {t["name"] for t in task.payload.get("tools", [])}
             unknown = [c.name for c in ans.tool_calls if c.name not in known]
@@ -340,8 +379,10 @@ def make_router(token: str, core_of) -> APIRouter:
             raise HTTPException(400, "messages must be a non-empty list")
         normalized = normalize_openai(body) if fmt == "openai" else normalize_anthropic(body)
         b = bridge(request)
-        ex_id, task_id, fut = await b.submit(normalized, agent, tag)
         build = openai_response if fmt == "openai" else anthropic_response
+        if backend_for(normalized.get("model"), core.settings.bridge_default_backend) == "headless":
+            return await handle_headless(request, core, normalized, build, fmt, agent, tag, bool(body.get("stream")))
+        ex_id, task_id, fut = await b.submit(normalized, agent, tag)
 
         if not body.get("stream"):
             # The body is already read, so the next ASGI message is the disconnect.
@@ -385,6 +426,84 @@ def make_router(token: str, core_of) -> APIRouter:
 
         return StreamingResponse(events(), media_type="text/event-stream")
 
+    async def handle_headless(request: Request, core: Core, normalized: dict, build, fmt: str, agent: str,
+                              tag: str | None, stream: bool):
+        backend: HeadlessBackend = request.app.state.headless
+        if len(json.dumps(normalized)) > MAX_PAYLOAD_CHARS:
+            raise HTTPException(413, f"request exceeds {MAX_PAYLOAD_CHARS} characters")
+        ex = await core.create_execution("model_request", {"agent": agent, "format": fmt, "backend": "headless",
+                                                           "model": normalized.get("model"), "tag": tag}, "api")
+        await core.set_status(ex.id, status="running", message="claude -p is answering")
+        started = time.perf_counter()
+
+        async def run():
+            with tracer().start_as_current_span("bridge.headless_request", attributes={
+                    "companion.execution_id": ex.id, "gen_ai.system": "claude-headless",
+                    "gen_ai.request.model": normalized.get("model") or "claude-headless"}) as span:
+                ans, usage = await backend.answer(normalized)
+                span.set_attribute("gen_ai.usage.input_tokens", usage["input"])
+                span.set_attribute("gen_ai.usage.output_tokens", usage["output"])
+                span.set_attribute("companion.tool_calls", len(ans.tool_calls))
+                return ans, usage
+
+        async def finish(ans, usage):
+            latency = round((time.perf_counter() - started) * 1000, 1)
+            await core.record_usage(provider="claude-headless", model=normalized.get("model") or "claude-headless",
+                                    source="bridge", execution_id=ex.id, input_tokens=usage["input"],
+                                    output_tokens=usage["output"], cost_usd=0.0, latency_ms=latency, tag=tag)
+            await core.set_status(ex.id, status="succeeded", progress=1.0, message="answered",
+                                  result={"tool_calls": [c.name for c in ans.tool_calls], "chars": len(ans.content),
+                                          "cached_tokens": usage["cached"],
+                                          "api_equivalent_usd": usage.get("api_equivalent_usd")})
+
+        async def fail(e: Exception):
+            await core.set_status(ex.id, status="failed", error=str(e)[:500])
+            await core.record_usage(provider="claude-headless", model=normalized.get("model") or "claude-headless",
+                                    source="bridge", execution_id=ex.id, ok=False, error=str(e)[:500], tag=tag)
+
+        if not stream:
+            async def listen() -> None:
+                while (await request.receive())["type"] != "http.disconnect":
+                    pass
+
+            work, listener = asyncio.create_task(run()), asyncio.create_task(listen())
+            done, _ = await asyncio.wait({work, listener}, return_when=asyncio.FIRST_COMPLETED)
+            if work not in done:  # caller hung up: stop the CLI process too
+                work.cancel()
+                await asyncio.gather(work, return_exceptions=True)
+                await core.set_status(ex.id, status="cancelled", message="caller disconnected")
+                raise HTTPException(499, "client disconnected")
+            listener.cancel()
+            try:
+                ans, usage = work.result()
+            except HeadlessError as e:
+                await fail(e)
+                raise HTTPException(e.status, str(e)) from None
+            await finish(ans, usage)
+            return JSONResponse(build(normalized, ans, usage))
+
+        async def events():
+            work = asyncio.create_task(run())
+            try:
+                while not work.done():
+                    done, _ = await asyncio.wait({work}, timeout=10)
+                    if not done:
+                        yield ": claude -p is working\n\n"
+                ans, usage = work.result()
+            except HeadlessError as e:
+                await fail(e)
+                yield _sse({"type": "error", "error": {"type": "backend_error", "message": str(e)}}, "error")
+                return
+            finally:
+                if not work.done():
+                    work.cancel()
+            await finish(ans, usage)
+            full = build(normalized, ans, usage)
+            for chunk in (openai_stream_events(full) if fmt == "openai" else anthropic_stream_events(full)):
+                yield chunk
+
+        return StreamingResponse(events(), media_type="text/event-stream")
+
     @router.post("/v1/chat/completions")
     async def chat_completions(request: Request, authorization: str = Header(default=""), x_api_key: str = Header(default=""),
                                x_agent_name: str = Header(default="agent"),
@@ -402,23 +521,51 @@ def make_router(token: str, core_of) -> APIRouter:
     @router.get("/v1/models")
     async def models(authorization: str = Header(default=""), x_api_key: str = Header(default="")):
         check(authorization, x_api_key)
-        return {"object": "list", "data": [{"id": BRIDGE_MODEL, "object": "model", "owned_by": "claude-desktop-session",
-                                            "type": "model", "display_name": "Claude (your Code tab session)"}]}
+        return {"object": "list", "data": [
+            {"id": BRIDGE_MODEL, "object": "model", "owned_by": "claude-code", "type": "model",
+             "display_name": "Claude, answered in your Code tab session"},
+            {"id": HEADLESS_MODEL, "object": "model", "owned_by": "claude-code", "type": "model",
+             "display_name": "Claude via headless `claude -p` (append /<model> to pick one)"}]}
+
+    @router.get("/api/bridge/backends")
+    async def backends(request: Request, authorization: str = Header(default="")):
+        check(authorization, "")
+        core = core_of(request)
+        live = await bridge(request)._live_tasks()
+        return {"default_backend": core.settings.bridge_default_backend,
+                "session": {"model": BRIDGE_MODEL, "waiting_requests": len(live),
+                            "claim_ttl_s": core.settings.bridge_claim_ttl_s, "timeout_s": core.settings.bridge_timeout_s},
+                "headless": {"model": HEADLESS_MODEL, **request.app.state.headless.status()}}
 
     @router.get("/api/bridge/next")
-    async def next_request(request: Request, wait: float = 50, authorization: str = Header(default="")):
+    async def next_request(request: Request, wait: float = 50, authorization: str = Header(default=""),
+                           x_companion_actor: str = Header(default="api")):
         check(authorization, "")
-        task = await bridge(request).next_request(min(max(wait, 0), 55))
+        task = await bridge(request).next_request(min(max(wait, 0), 55), x_companion_actor)
         return {"request": view(task) if task else None}
 
     @router.get("/api/bridge/pending")
-    async def pending(request: Request, authorization: str = Header(default="")):
+    async def pending(request: Request, wait: float = 0, authorization: str = Header(default="")):
+        """Waiting requests without their payloads, for a coordinator that hands each
+        one to a fresh helper. Waits up to `wait` seconds for at least one unclaimed."""
         check(authorization, "")
-        tasks = await core_of(request).list_tasks(kind="llm")
-        live = [t for t in tasks if t.id in bridge(request).waiters]
-        return {"pending": len(live), "requests": [{"request_id": t.id, "agent": t.payload.get("agent"),
-                                                    "messages": len(t.payload.get("messages", [])),
-                                                    "created_at": t.created_at.isoformat()} for t in live]}
+        b = bridge(request)
+        deadline = time.monotonic() + min(max(wait, 0), 55)
+        while True:
+            live = await b._live_tasks()
+            unclaimed = [t for t in live if not b._claim_fresh(t)]
+            remaining = deadline - time.monotonic()
+            if unclaimed or remaining <= 0:
+                break
+            b.arrived.clear()
+            try:
+                await asyncio.wait_for(b.arrived.wait(), min(remaining, 2))
+            except asyncio.TimeoutError:
+                pass
+        return {"unclaimed": len(unclaimed), "claimed": len(live) - len(unclaimed),
+                "requests": [{"request_id": t.id, "agent": t.payload.get("agent"), "claimed": b._claim_fresh(t),
+                              "messages": len(t.payload.get("messages", [])), "created_at": t.created_at.isoformat()}
+                             for t in live]}
 
     @router.post("/api/bridge/{task_id}/answer")
     async def answer(task_id: str, body: AnswerIn, request: Request, authorization: str = Header(default=""),

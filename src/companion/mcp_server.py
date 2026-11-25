@@ -422,15 +422,34 @@ async def wait_for_model_request(
     ctx: Context,
     wait_seconds: Annotated[int, Field(ge=0, le=55, description="How long to wait for the next request")] = 45,
 ) -> dict[str, Any]:
-    """Session model bridge: get the next model call from an agent pointed at the gateway's
-    /v1/chat/completions or /v1/messages endpoint. You then act as that agent's model and reply with
-    answer_model_request. Returns request=null if none arrived; call again to keep serving."""
+    """Session model bridge: claim the next model call from an agent pointed at the gateway's
+    /v1/chat/completions or /v1/messages endpoint (model claude-session). You then act as that agent's
+    model and reply with answer_model_request. Each call claims a different request, so several helpers
+    can serve in parallel. Returns request=null if none arrived; call again to keep serving."""
     await _ensure_gateway()
     name, version, proto = _client_info(ctx)
     try:
         await _client().post("/api/mcp/heartbeat", json={"client_name": name, "client_version": version,
                                                          "protocol_version": proto, "tool": "wait_for_model_request"})
         r = await _client().get("/api/bridge/next", params={"wait": wait_seconds}, timeout=wait_seconds + 15)
+    except httpx.HTTPError as e:
+        raise ToolError(f"gateway request failed: {e}") from None
+    if r.status_code >= 400:
+        raise ToolError(f"{r.text[:300]} (HTTP {r.status_code})")
+    return r.json()
+
+
+@server.tool(annotations=READ)
+async def watch_model_requests(
+    ctx: Context,
+    wait_seconds: Annotated[int, Field(ge=0, le=55, description="Wait up to this long for an unclaimed request")] = 45,
+) -> dict[str, Any]:
+    """Session model bridge, parallel serving: how many agent model calls are waiting, without their
+    contents. A coordinator uses this to start one fresh model-responder helper per unclaimed request,
+    so answers are independent and run in parallel. Does not claim anything."""
+    await _ensure_gateway()
+    try:
+        r = await _client().get("/api/bridge/pending", params={"wait": wait_seconds}, timeout=wait_seconds + 15)
     except httpx.HTTPError as e:
         raise ToolError(f"gateway request failed: {e}") from None
     if r.status_code >= 400:

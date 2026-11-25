@@ -18,7 +18,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 
-from companion import __version__, agents, bridge, evals, reports, workflows
+from companion import __version__, agents, bridge, evals, headless, reports, workflows
 from companion.config import Settings, get_settings
 from companion.core import TERMINAL, Core, NotFound, PermissionDenied
 from companion.db import make_engine, migrate, sessionmaker
@@ -103,7 +103,8 @@ def create_app(settings: Settings | None = None, registry: ProviderRegistry | No
         async with AsyncSqliteSaver.from_conn_string(str(settings.checkpoint_path)) as saver:
             core.checkpointer = saver
             app.state.core = core
-            app.state.bridge = bridge.Bridge(core, settings.bridge_timeout_s)
+            app.state.bridge = bridge.Bridge(core, settings.bridge_timeout_s, settings.bridge_claim_ttl_s)
+            app.state.headless = headless.HeadlessBackend(settings)
             flusher = asyncio.create_task(span_flush_loop(sessions))
             try:
                 yield
@@ -175,6 +176,8 @@ def create_app(settings: Settings | None = None, registry: ProviderRegistry | No
             "providers": core.registry.describe(),
             "executions": {**counts, "active": len(core.tasks)},
             "open_session_tasks": open_tasks,
+            "model_bridge": {"default_backend": settings.bridge_default_backend,
+                             "headless": request.app.state.headless.status()},
             "model_calls_24h": {"total": usage[0] or 0, "errors": int(usage[1] or 0)},
         }
 
