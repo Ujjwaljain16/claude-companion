@@ -144,6 +144,37 @@ async def test_new_request_is_not_expired_before_its_waiter_exists(gw):
         assert (await s.get(SessionTask, task.id)).status == "expired"
 
 
+async def test_parallel_servers_claim_different_requests_and_stale_claims_return(gw):
+    from datetime import timedelta
+
+    from companion.models import SessionTask, utcnow
+
+    reqs = [asyncio.create_task(gw.post("/v1/chat/completions", json={
+        "model": "claude-session", "messages": [{"role": "user", "content": f"q{i}"}]})) for i in range(3)]
+    for _ in range(100):
+        if (await gw.get("/api/bridge/pending")).json()["unclaimed"] == 3:
+            break
+        await asyncio.sleep(0.05)
+    pending = (await gw.get("/api/bridge/pending")).json()
+    assert pending["unclaimed"] == 3 and "messages" not in json.dumps(pending["requests"][0]).replace('"messages": ', "")
+
+    got = await asyncio.gather(*(gw.bridge.next_request(1, f"helper-{i}") for i in range(3)))
+    assert len({t.id for t in got}) == 3  # each helper claimed a different request
+    assert await gw.bridge.next_request(0) is None  # all claimed
+    assert (await gw.get("/api/bridge/pending")).json() == {**(await gw.get("/api/bridge/pending")).json(), "unclaimed": 0, "claimed": 3}
+
+    async with gw.core.sessions() as s:  # helper-0 died: its claim goes stale
+        (await s.get(SessionTask, got[0].id)).claimed_at = utcnow() - timedelta(seconds=gw.core.settings.bridge_claim_ttl_s + 1)
+        await s.commit()
+    again = await gw.bridge.next_request(0, "helper-3")
+    assert again is not None and again.id == got[0].id and again.claimed_by == "helper-3"
+
+    for t in got:
+        assert (await gw.post(f"/api/bridge/{t.id}/answer", json={"content": f"answer {t.id}"})).status_code == 200
+    outs = [r.json()["choices"][0]["message"]["content"] for r in await asyncio.gather(*reqs)]
+    assert sorted(outs) == sorted(f"answer {t.id}" for t in got)
+
+
 async def test_timed_out_request_is_expired(live_gateway):  # noqa: F811
     from companion.config import Settings  # noqa: F401
 

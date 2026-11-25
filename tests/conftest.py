@@ -63,6 +63,7 @@ async def gw(settings, fake):
                                      headers={"Authorization": f"Bearer {settings.gateway_token()}"}) as client:
             client.core = app.state.core  # type: ignore[attr-defined]
             client.bridge = app.state.bridge  # type: ignore[attr-defined]
+            client.app = app  # type: ignore[attr-defined]
             yield client
 
 
